@@ -177,50 +177,37 @@ export default function App() {
     });
   }, []);
 
-  // Update the Recently Played screen in Android Auto
+  // Update the Recently Played screen in Android Auto (secondary screen)
   const updateRecentlyPlayedScreen = useCallback(() => {
     const recent = recentlyPlayedRef.current;
     
-    // Android Auto only allows 1 action with a custom title in the action strip
-    // So we only use "Browse All" on the main screen
-    const mainScreenActionStrip = [
-      {
-        title: 'Browse All',
-        onPress: () => {
-          console.log('[App] Navigate to Browse All');
-          CarProjection.navigateToScreen('browse');
-        },
-      },
-    ];
-    
-    // MessageTemplate only allows 1 action with custom title in action strip
-    const messageActionStripItems = [
-      {
-        title: 'Browse All',
-        onPress: () => {
-          console.log('[App] Navigate to Browse All');
-          CarProjection.navigateToScreen('browse');
-        },
-      },
-    ];
-    
     if (recent.length === 0) {
-      // Show "Nothing recently played" message (MessageTemplate allows only 1 action strip item)
+      // Show "Nothing recently played" message
       CarProjection.registerScreen({
-        name: 'main',
+        name: 'recentlyPlayed',
         template: createMessageTemplate({
           title: 'Recently Played',
           message: 'Nothing recently played.\n\nSelect something from the media library on your phone to start listening.',
-          actionStrip: messageActionStripItems,
+          headerAction: {
+            title: 'Back',
+            onPress: () => {
+              CarProjection.popScreen();
+            },
+          },
         }),
       });
     } else {
-      // Show recently played list (ListTemplate supports multiple action strip items)
+      // Show recently played list
       CarProjection.registerScreen({
-        name: 'main',
+        name: 'recentlyPlayed',
         template: createListTemplate({
           title: 'Recently Played',
-          actionStrip: mainScreenActionStrip,
+          headerAction: {
+            title: 'Back',
+            onPress: () => {
+              CarProjection.popScreen();
+            },
+          },
           items: recent.map((item) => ({
             title: item.title,
             texts: [item.artist || 'Unknown Artist'],
@@ -234,23 +221,51 @@ export default function App() {
     }
   }, []);
 
-  // Update the Now Playing screen in Android Auto
+  // Update the main Now Playing screen in Android Auto (this is the root screen)
   const updateNowPlayingScreen = useCallback((track, playing) => {
-    if (!track) return;
+    if (!track) {
+      // No track - show blank state with "Recently Played" button
+      CarProjection.registerScreen({
+        name: 'main',
+        template: createPaneTemplate({
+          title: 'Now Playing',
+          actionStrip: [
+            {
+              title: 'Recently Played',
+              onPress: () => {
+                console.log('[App] Navigate to Recently Played');
+                CarProjection.navigateToScreen('recentlyPlayed');
+              },
+            },
+          ],
+          rows: [
+            {
+              title: 'No track playing',
+              texts: ['Select something from Recently Played to start listening'],
+            },
+          ],
+          actions: [],
+        }),
+      });
+      return;
+    }
 
     const statusIcon = playing ? '▶' : '⏸';
     const statusText = playing ? 'Now Playing' : 'Paused';
 
     CarProjection.registerScreen({
-      name: 'nowPlaying',
+      name: 'main',
       template: createPaneTemplate({
         title: `${statusIcon} ${statusText}`,
-        headerAction: {
-          title: 'Back',
-          onPress: () => {
-            CarProjection.popScreen();
+        actionStrip: [
+          {
+            title: 'Recently Played',
+            onPress: () => {
+              console.log('[App] Navigate to Recently Played');
+              CarProjection.navigateToScreen('recentlyPlayed');
+            },
           },
-        },
+        ],
         rows: [
           {
             title: track.title,
@@ -318,12 +333,12 @@ export default function App() {
       addToRecentlyPlayed(track);
 
       // Update Android Auto screens
-      updateRecentlyPlayedScreen();
       updateNowPlayingScreen(track, true);
+      updateRecentlyPlayedScreen();
 
-      // Navigate to Now Playing screen if selected from Android Auto
+      // Go back to main (Now Playing) screen if selected from Android Auto
       if (fromAndroidAuto) {
-        CarProjection.navigateToScreen('nowPlaying');
+        CarProjection.popToRoot();
       }
     } catch (error) {
       console.log('[App] Error playing track:', error.message || error);
@@ -366,94 +381,32 @@ export default function App() {
       
       setCurrentTrack(null);
       currentTrackRef.current = null;
+      setIsPlaying(false);
+      isPlayingRef.current = false;
       
-      // Navigate back to main screen
-      CarProjection.popToRoot();
+      // Update main screen to show blank state
+      updateNowPlayingScreen(null, false);
     } catch (error) {
       console.error('[App] Error stopping:', error);
     }
-  }, []);
+  }, [updateNowPlayingScreen]);
 
   // Initialize Android Auto screens
   useEffect(() => {
     // IMPORTANT: Register "main" screen FIRST so it's the root screen
-    // This must be registered before other screens to ensure Android Auto picks it as root
+    // Register the main screen (Now Playing) - this is the root screen
+    // Start with blank state (no track)
+    updateNowPlayingScreen(null, false);
+    
+    // Register the Recently Played screen (secondary screen)
     updateRecentlyPlayedScreen();
-
-    // Register the Browse All screen
-    console.log('[App] About to register browse screen, mediaItems length:', mediaItems?.length);
-    try {
-      CarProjection.registerScreen({
-        name: 'browse',
-        template: createListTemplate({
-          title: 'Browse All',
-          headerAction: {
-            title: 'Back',
-            onPress: () => {
-              CarProjection.popScreen();
-            },
-          },
-          actionStrip: [
-            {
-              title: 'Now Playing',
-              onPress: () => {
-                console.log('[App] Navigate to Now Playing from Browse');
-                CarProjection.navigateToScreen('nowPlaying');
-              },
-            },
-          ],
-          items: mediaItems.map((item) => ({
-            title: item.title,
-            texts: [item.artist || 'Unknown Artist'],
-            onPress: () => {
-              console.log('[App] Android Auto: Selected track from browse:', item.title);
-              playTrack(item, true);
-            },
-          })),
-        }),
-      });
-      console.log('[App] Browse screen registered successfully');
-    } catch (e) {
-      console.error('[App] Browse screen registration error:', e);
-    }
-
-    // Pre-register the Now Playing screen (will be updated when a track plays)
-    CarProjection.registerScreen({
-      name: 'nowPlaying',
-      template: createPaneTemplate({
-        title: 'Now Playing',
-        headerAction: {
-          title: 'Back',
-          onPress: () => {
-            CarProjection.popScreen();
-          },
-        },
-        rows: [
-          {
-            title: 'No track selected',
-            texts: ['Select a track to start playing'],
-          },
-        ],
-        actions: [],
-      }),
-    });
 
     // Listen for Android Auto connection status
     const sessionStartedSub = CarProjection.addSessionStartedListener(() => {
       console.log('[App] Android Auto session started');
       setIsConnected(true);
-      // Refresh screens when connected
-      updateRecentlyPlayedScreen();
       
-      // Sync the Now Playing screen with current track state (use refs which are always current)
-      const track = currentTrackRef.current;
-      const playing = isPlayingRef.current;
-      console.log('[App] AA connect sync - track:', track?.title, 'playing:', playing);
-      if (track) {
-        updateNowPlayingScreen(track, playing);
-      }
-      
-      // Also try to get current state from TrackPlayer asynchronously
+      // Check for current track state and sync with Android Auto
       (async () => {
         try {
           const activeTrack = await TrackPlayer.getActiveTrack();
@@ -464,17 +417,37 @@ export default function App() {
             // Find the matching media item
             const mediaTrack = mediaItems.find(item => item.id === activeTrack.id);
             if (mediaTrack) {
-              const isCurrentlyPlaying = state?.state === State.Playing;
-              console.log('[App] AA connect - Found matching track:', mediaTrack.title, 'playing:', isCurrentlyPlaying);
+              console.log('[App] AA connect - Found matching track:', mediaTrack.title);
+              
+              // Update local state
               setCurrentTrack(mediaTrack);
               currentTrackRef.current = mediaTrack;
-              setIsPlaying(isCurrentlyPlaying);
-              isPlayingRef.current = isCurrentlyPlaying;
-              updateNowPlayingScreen(mediaTrack, isCurrentlyPlaying);
+              
+              // Resume playback on Android Auto
+              console.log('[App] AA connect - Resuming playback...');
+              await TrackPlayer.play();
+              setIsPlaying(true);
+              isPlayingRef.current = true;
+              
+              // Update the main (Now Playing) screen with current track info
+              updateNowPlayingScreen(mediaTrack, true);
+              // Also update Recently Played screen
+              updateRecentlyPlayedScreen();
+            } else {
+              // No matching track found, show blank Now Playing
+              updateNowPlayingScreen(null, false);
+              updateRecentlyPlayedScreen();
             }
+          } else {
+            // No active track, show blank Now Playing
+            updateNowPlayingScreen(null, false);
+            updateRecentlyPlayedScreen();
           }
         } catch (error) {
-          console.log('[App] Error getting TrackPlayer state on AA connect:', error?.message || error);
+          console.log('[App] Error syncing TrackPlayer state on AA connect:', error?.message || error);
+          // Fallback: show blank Now Playing
+          updateNowPlayingScreen(null, false);
+          updateRecentlyPlayedScreen();
         }
       })();
     });
