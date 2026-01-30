@@ -68,11 +68,47 @@ export default function App() {
   const currentTrackRef = useRef(null);
   const isPlayingRef = useRef(false);
   const recentlyPlayedRef = useRef([]);
+  // Track if we need to restart audio when screen becomes visible
+  const pendingAudioRestartRef = useRef(null); // Will hold { track, position } if restart is pending
   
   // Keep refs in sync
   useEffect(() => {
     isPlayingRef.current = isPlaying;
   }, [isPlaying]);
+
+  // Configure MediaBrowserService so Android Auto can route audio when it connects
+  useEffect(() => {
+    CarProjection.configureMediaSession({
+      serviceName: 'com.doublesymmetry.trackplayer.service.MusicService',
+    }).catch((err) => console.warn('[App] configureMediaSession:', err?.message));
+  }, []);
+
+  // Map TrackPlayer state to CarProjection playback state string
+  const playbackStateToString = (state) => {
+    if (state === State.Playing) return 'playing';
+    if (state === State.Paused) return 'paused';
+    if (state === State.Stopped || state === State.Ready || state === State.None) return 'stopped';
+    if (state === State.Buffering || state === State.Connecting) return 'buffering';
+    if (state === State.Error) return 'error';
+    return 'none';
+  };
+
+  // Sync our MediaBrowserService MediaSession so Android Auto sees us as the active media source
+  const syncMediaSessionState = useCallback(async () => {
+    try {
+      const [state, progress] = await Promise.all([TrackPlayer.getPlaybackState(), TrackPlayer.getProgress()]);
+      const track = currentTrackRef.current;
+      await CarProjection.updateMediaPlaybackState({
+        state: playbackStateToString(state?.state),
+        position: progress?.position ?? 0,
+        duration: progress?.duration ?? 0,
+        title: track?.title,
+        artist: track?.artist,
+      });
+    } catch (e) {
+      // ignore if module or TrackPlayer not ready
+    }
+  }, []);
 
   // Initialize track player and load recently played
   useEffect(() => {
@@ -99,11 +135,11 @@ export default function App() {
             const playing = event.state === State.Playing;
             setIsPlaying(playing);
             isPlayingRef.current = playing;
-            
-            // Update Now Playing screen when state changes
+
             if (currentTrackRef.current) {
               updateNowPlayingScreen(currentTrackRef.current, playing);
             }
+            syncMediaSessionState();
           }
         );
         
@@ -112,11 +148,11 @@ export default function App() {
           async (event) => {
             console.log('[App] Active track changed:', event);
             if (event.track) {
-              // Find the matching media item
               const track = mediaItems.find(item => item.id === event.track.id);
               if (track) {
                 setCurrentTrack(track);
                 currentTrackRef.current = track;
+                syncMediaSessionState();
               }
             }
           }
@@ -127,8 +163,13 @@ export default function App() {
           Event.PlaybackProgressUpdated,
           (event) => {
             setProgress({ position: event.position, duration: event.duration });
+            syncMediaSessionState();
           }
         );
+        
+        TrackPlayer.addEventListener(Event.PlaybackError, (event) => {
+          console.log('[App] Playback error:', event?.message || event?.code || event);
+        });
         
         console.log('[App] Event listeners set up');
       } catch (error) {
@@ -143,7 +184,7 @@ export default function App() {
       if (trackChangedListener) trackChangedListener.remove();
       if (progressListener) progressListener.remove();
     };
-  }, []);
+  }, [syncMediaSessionState]);
 
   const loadRecentlyPlayed = async () => {
     try {
@@ -304,6 +345,10 @@ export default function App() {
     console.log('[App] Player ready:', isPlayerReady);
     console.log('[App] Track URL:', track.mediaUri);
     
+    // #region agent log
+    fetch('http://127.0.0.1:7246/ingest/c51db15d-5c6e-4bc6-b2eb-6028cf8cb2e7',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'App.js:308',message:'playTrack called',data:{trackTitle:track.title,fromAndroidAuto,isPlayerReady},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'D'})}).catch(()=>{});
+    // #endregion
+    
     if (!isPlayerReady) {
       console.log('[App] Player not ready yet, setting up...');
       await setupPlayer();
@@ -325,6 +370,11 @@ export default function App() {
       console.log('[App] Starting playback...');
       await TrackPlayer.play();
       console.log('[App] Playback started successfully');
+      
+      // #region agent log
+      const stateAfterPlay = await TrackPlayer.getPlaybackState();
+      fetch('http://127.0.0.1:7246/ingest/c51db15d-5c6e-4bc6-b2eb-6028cf8cb2e7',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'App.js:340',message:'playTrack - after TrackPlayer.play()',data:{trackTitle:track.title,stateAfterPlay:stateAfterPlay?.state},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'D'})}).catch(()=>{});
+      // #endregion
       
       setCurrentTrack(track);
       currentTrackRef.current = track;
@@ -401,51 +451,52 @@ export default function App() {
     // Register the Recently Played screen (secondary screen)
     updateRecentlyPlayedScreen();
 
-    // Listen for Android Auto connection status
+    // With mediaOnly: true the Car App Service is not in the manifest, so this never fires.
+    // Connection is via MediaBrowser only → onMediaBrowserConnected below.
     const sessionStartedSub = CarProjection.addSessionStartedListener(() => {
-      console.log('[App] Android Auto session started');
+      console.log('[App] Android Auto session started (user opened app on DHU)');
       setIsConnected(true);
-      
-      // Check for current track state and sync with Android Auto
+
       (async () => {
         try {
           const activeTrack = await TrackPlayer.getActiveTrack();
           const state = await TrackPlayer.getPlaybackState();
-          console.log('[App] AA connect - TrackPlayer activeTrack:', activeTrack?.title, 'state:', state?.state);
-          
-          if (activeTrack) {
-            // Find the matching media item
-            const mediaTrack = mediaItems.find(item => item.id === activeTrack.id);
-            if (mediaTrack) {
-              console.log('[App] AA connect - Found matching track:', mediaTrack.title);
-              
-              // Update local state
-              setCurrentTrack(mediaTrack);
-              currentTrackRef.current = mediaTrack;
-              
-              // Resume playback on Android Auto
-              console.log('[App] AA connect - Resuming playback...');
+          const mediaTrack = activeTrack ? mediaItems.find(item => item.id === activeTrack.id) : null;
+          const wasPlaying = state?.state === State.Playing;
+
+          if (activeTrack && mediaTrack) {
+            setCurrentTrack(mediaTrack);
+            currentTrackRef.current = mediaTrack;
+
+            if (wasPlaying) {
+              // Was playing on phone: restart to route audio to car (pause → wait → resume).
+              const currentPosition = await TrackPlayer.getProgress();
+              await TrackPlayer.pause();
+              await new Promise((r) => setTimeout(r, 2000));
+              if (currentPosition?.position > 0) await TrackPlayer.seekTo(currentPosition.position);
               await TrackPlayer.play();
               setIsPlaying(true);
               isPlayingRef.current = true;
-              
-              // Update the main (Now Playing) screen with current track info
               updateNowPlayingScreen(mediaTrack, true);
-              // Also update Recently Played screen
-              updateRecentlyPlayedScreen();
             } else {
-              // No matching track found, show blank Now Playing
-              updateNowPlayingScreen(null, false);
-              updateRecentlyPlayedScreen();
+              // Had track but paused: resume so audio plays when they open app on DHU.
+              await TrackPlayer.play();
+              setIsPlaying(true);
+              isPlayingRef.current = true;
+              updateNowPlayingScreen(mediaTrack, true);
             }
+            updateRecentlyPlayedScreen();
+          } else if (!activeTrack && recentlyPlayedRef.current?.length > 0) {
+            // No track: auto-play first recently played so opening app on DHU starts audio.
+            console.log('[App] AA session started - no track, auto-playing first recently played');
+            const first = recentlyPlayedRef.current[0];
+            playTrack(first, true);
           } else {
-            // No active track, show blank Now Playing
             updateNowPlayingScreen(null, false);
             updateRecentlyPlayedScreen();
           }
         } catch (error) {
-          console.log('[App] Error syncing TrackPlayer state on AA connect:', error?.message || error);
-          // Fallback: show blank Now Playing
+          console.log('[App] Error on AA session start:', error?.message || error);
           updateNowPlayingScreen(null, false);
           updateRecentlyPlayedScreen();
         }
@@ -455,6 +506,89 @@ export default function App() {
     const sessionEndedSub = CarProjection.addSessionEndedListener(() => {
       console.log('[App] Android Auto session ended');
       setIsConnected(false);
+      // Clear any pending audio restart
+      pendingAudioRestartRef.current = null;
+    });
+
+    // When Android Auto connects via MediaBrowser: DHU binds to us and calls onGetRoot.
+    // With mediaOnly: true this fires when the user taps our app (no Car App). Same flow as Spotify.
+    // (1) Sync MediaSession so the car sees state; (2) start or resume playback so audio goes to the car.
+    const mediaBrowserConnectedSub = CarProjection.addMediaBrowserConnectedListener(() => {
+      console.log('[App] MediaBrowser connected - user selected our app on DHU (or plug-in)');
+      setIsConnected(true);
+      (async () => {
+        try {
+          await syncMediaSessionState();
+
+          const activeTrack = await TrackPlayer.getActiveTrack();
+          const state = await TrackPlayer.getPlaybackState();
+          const wasPlaying = state?.state === State.Playing;
+          const mediaTrack = activeTrack ? mediaItems.find((item) => item.id === activeTrack.id) : null;
+
+          if (activeTrack && mediaTrack) {
+            setCurrentTrack(mediaTrack);
+            currentTrackRef.current = mediaTrack;
+            if (wasPlaying) {
+              console.log('[App] MediaBrowser connect - restarting playback to route audio to car');
+              const progress = await TrackPlayer.getProgress();
+              await TrackPlayer.pause();
+              await new Promise((r) => setTimeout(r, 2000));
+              if (progress?.position > 0) await TrackPlayer.seekTo(progress.position);
+              await TrackPlayer.play();
+              setIsPlaying(true);
+              isPlayingRef.current = true;
+              updateNowPlayingScreen(mediaTrack, true);
+            } else {
+              await TrackPlayer.play();
+              setIsPlaying(true);
+              isPlayingRef.current = true;
+              updateNowPlayingScreen(mediaTrack, true);
+            }
+            updateRecentlyPlayedScreen();
+          } else if (!activeTrack && recentlyPlayedRef.current?.length > 0) {
+            console.log('[App] MediaBrowser connect - no track, auto-playing first recently played');
+            const first = recentlyPlayedRef.current[0];
+            playTrack(first, true);
+          } else {
+            updateNowPlayingScreen(null, false);
+            updateRecentlyPlayedScreen();
+          }
+          await syncMediaSessionState();
+        } catch (e) {
+          console.warn('[App] MediaBrowser connect - failed:', e?.message);
+        }
+      })();
+    });
+
+    // Car sent Play (e.g. user taps Play on DHU). Resume or start playback.
+    const mediaPlaySub = CarProjection.addMediaPlayListener(() => {
+      console.log('[App] Car sent Play command');
+      (async () => {
+        try {
+          if (currentTrackRef.current && !isPlayingRef.current) {
+            await resumeTrack();
+          } else if (!currentTrackRef.current && recentlyPlayedRef.current?.length > 0) {
+            playTrack(recentlyPlayedRef.current[0], true);
+          }
+        } catch (e) {
+          console.warn('[App] onMediaPlay handler error:', e?.message);
+        }
+      })();
+    });
+
+    const mediaPauseSub = CarProjection.addMediaPauseListener(() => {
+      console.log('[App] Car sent Pause command');
+      pauseTrack().catch((e) => console.warn('[App] onMediaPause error:', e?.message));
+    });
+
+    const mediaStopSub = CarProjection.addMediaStopListener(() => {
+      console.log('[App] Car sent Stop command');
+      stopTrack().catch((e) => console.warn('[App] onMediaStop error:', e?.message));
+    });
+
+    // Listen for screen changes - for logging/debugging
+    const screenChangedSub = CarProjection.addScreenChangedListener((screenName) => {
+      console.log('[App] Android Auto screen changed to:', screenName);
     });
 
     // Check initial connection status
@@ -466,8 +600,13 @@ export default function App() {
     return () => {
       sessionStartedSub.remove();
       sessionEndedSub.remove();
+      mediaBrowserConnectedSub.remove();
+      mediaPlaySub.remove();
+      mediaPauseSub.remove();
+      mediaStopSub.remove();
+      screenChangedSub.remove();
     };
-  }, [playTrack, updateRecentlyPlayedScreen]);
+  }, [playTrack, pauseTrack, resumeTrack, stopTrack, updateRecentlyPlayedScreen, updateNowPlayingScreen]);
 
   // Update Now Playing screen when track or playing state changes
   useEffect(() => {

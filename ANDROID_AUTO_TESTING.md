@@ -45,10 +45,15 @@ npx expo run:android
 
 ## What to Expect
 
-When you run the app:
-- The app will register a test screen with 2 items
-- When connected to Android Auto, you should see "Android Auto Test" screen
-- Check console logs for: "Android Auto session started!" and screen change events
+### With `mediaOnly: true` (current config – MediaBrowserService only, like Spotify)
+- The app is **not** a Car App Library app; the DHU discovers it only as a media app.
+- After **clean prebuild** and rebuild: when you select the app on the DHU, you should see **`[App] MediaBrowser connected`** in Metro. You will **not** see "session started" or "onScreenChanged" from native (no Car App Service).
+- Audio and now-playing are driven by the MediaBrowserService; connection is via `onMediaBrowserConnected`.
+- **Important:** Changing `mediaOnly` (or plugin config) requires `npx expo prebuild --clean` and a full `npx expo run:android` so the manifest is regenerated.
+
+### With Car App (mediaOnly: false)
+- The app registers screens and shows a Car App UI on the DHU.
+- Check console logs for: "Android Auto session started!" and screen change events.
 
 ## Troubleshooting
 
@@ -66,3 +71,11 @@ When you run the app:
 ### Module not found
 - Make sure the local package is built: `cd ../react-native-android-auto && npm run build`
 - Reinstall: `npm install` in the test app directory
+
+### Debug log (MediaBrowserService lifecycle)
+The native MediaBrowserService writes to a file when it starts and when the car connects:
+
+- **On device:** `Android/data/com.annieiverson.TestAndroidAuto/files/androidauto_mediabrowser_debug.log`
+- **Pull to your machine:**  
+  `adb pull "/storage/emulated/0/Android/data/com.annieiverson.TestAndroidAuto/files/androidauto_mediabrowser_debug.log" ./`
+- You should see lines like `[MediaBrowserService] onCreate` and `[MediaBrowserService] onGetRoot - Android Auto connected from ...` when the service is used.

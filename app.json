@@ -33,7 +33,8 @@
         {
           "carAppCategory": "media",
           "minCarApiLevel": 1,
-          "targetCarApiLevel": 6
+          "targetCarApiLevel": 6,
+          "mediaOnly": true
         }
       ]
     ]
