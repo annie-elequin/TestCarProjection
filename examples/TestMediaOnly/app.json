@@ -1,0 +1,43 @@
+{
+  "expo": {
+    "name": "TestMediaOnly",
+    "slug": "TestMediaOnly",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": false,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.annieiverson.TestMediaOnly"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "edgeToEdgeEnabled": true,
+      "package": "com.annieiverson.TestMediaOnly"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "react-native-car-projection",
+        {
+          "carAppCategory": "media",
+          "minCarApiLevel": 1,
+          "targetCarApiLevel": 6,
+          "mediaOnly": true,
+          "mediaSupport": true
+        }
+      ]
+    ]
+  }
+}
