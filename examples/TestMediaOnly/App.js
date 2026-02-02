@@ -9,9 +9,16 @@ import { mediaItems } from './src/data/mediaItems';
  * Example: Media only (no Car App).
  * - mediaOnly: true → only MediaBrowserService, no Car App Service.
  * - DHU discovers app as media source only (like Spotify). Browse + now-playing.
- * Works on both iOS and Android; Android Auto shows media browse and now-playing only.
+ *
+ * Media browsing content is set via setMediaBrowseTree(). The tree is a map:
+ * - Key "__ROOT__" = items shown at the root of the browse screen in Android Auto.
+ * - Key "<item.id>" = children when user taps a browsable item (e.g. "Recently Played").
+ * - playable: true = tap starts playback (track); browsable: true = tap opens children (folder).
+ * This example adds a "Recently Played" folder with the last 3 played items.
  */
 const ROOT_ID = '__ROOT__';
+const RECENTLY_PLAYED_ID = 'recently_played';
+const MAX_RECENT = 3;
 
 const setupPlayer = async () => {
   try {
@@ -44,7 +51,12 @@ export default function App() {
   const [ready, setReady] = useState(false);
   const [currentTrack, setCurrentTrack] = useState(null);
   const [playbackState, setPlaybackState] = useState(State.None);
+  const [recentlyPlayed, setRecentlyPlayed] = useState([]); // last 3 played items (most recent first)
   const trackRef = useRef(null);
+  const recentlyPlayedRef = useRef([]);
+  useEffect(() => {
+    recentlyPlayedRef.current = recentlyPlayed;
+  }, [recentlyPlayed]);
 
   const syncMediaSession = useCallback(async () => {
     try {
@@ -66,18 +78,116 @@ export default function App() {
     }).catch(() => {});
   }, []);
 
+  // Build the Android Auto browse tree: root + "Recently Played" folder with last 3 played.
+  // When user taps "Recently Played" on the car screen, they see these items.
   useEffect(() => {
-    const browseTree = {
-      [ROOT_ID]: mediaItems.map((item) => ({
+    const rootItems = [
+      // Browsable folder: tap opens children (key = RECENTLY_PLAYED_ID below)
+      {
+        id: RECENTLY_PLAYED_ID,
+        title: 'Recently Played',
+        browsable: true,
+        playable: false,
+      },
+      // All tracks at root (playable)
+      ...mediaItems.map((item) => ({
         id: item.id,
         title: item.title,
         artist: item.artist,
         playable: true,
         browsable: false,
       })),
+    ];
+    const recentAsBrowseItems = recentlyPlayed.map((item) => ({
+      id: item.id,
+      title: item.title,
+      artist: item.artist,
+      playable: true,
+      browsable: false,
+    }));
+    const browseTree = {
+      [ROOT_ID]: rootItems,
+      [RECENTLY_PLAYED_ID]: recentAsBrowseItems, // children of "Recently Played"
     };
     CarProjection.setMediaBrowseTree(browseTree).catch(() => {});
-  }, []);
+  }, [recentlyPlayed]);
+
+  // When DHU connects (plug in or select app), sync state and auto-play so audio routes to car
+  useEffect(() => {
+    const sub = CarProjection.addMediaBrowserConnectedListener(() => {
+      (async () => {
+        try {
+          await syncMediaSession();
+          const [state, activeTrack] = await Promise.all([
+            TrackPlayer.getPlaybackState(),
+            TrackPlayer.getActiveTrack(),
+          ]);
+          const wasPlaying = state?.state === State.Playing;
+          const mediaTrack = activeTrack ? mediaItems.find((m) => m.id === activeTrack.id) : null;
+
+          if (mediaTrack) {
+            trackRef.current = mediaTrack;
+            setCurrentTrack(mediaTrack);
+            if (wasPlaying) {
+              const progress = await TrackPlayer.getProgress();
+              await TrackPlayer.pause();
+              await new Promise((r) => setTimeout(r, 2000));
+              if (progress?.position > 0) await TrackPlayer.seekTo(progress.position);
+              await TrackPlayer.play();
+              setPlaybackState(State.Playing);
+            } else {
+              await TrackPlayer.play();
+              setPlaybackState(State.Playing);
+            }
+            await syncMediaSession();
+          } else if (recentlyPlayedRef.current?.length > 0) {
+            const first = recentlyPlayedRef.current[0];
+            playTrack(first);
+            await syncMediaSession();
+          }
+        } catch (e) {
+          console.warn('[TestMediaOnly] onMediaBrowserConnected:', e?.message);
+        }
+      })();
+    });
+    return () => sub.remove();
+  }, [syncMediaSession]);
+
+  // When user taps Play on the DHU: resume or start first recently played
+  useEffect(() => {
+    const sub = CarProjection.addMediaPlayListener(() => {
+      (async () => {
+        try {
+          const [state, activeTrack] = await Promise.all([
+            TrackPlayer.getPlaybackState(),
+            TrackPlayer.getActiveTrack(),
+          ]);
+          if (activeTrack && state?.state !== State.Playing) {
+            await TrackPlayer.play();
+            setPlaybackState(State.Playing);
+            syncMediaSession();
+          } else if (!activeTrack && recentlyPlayedRef.current?.length > 0) {
+            playTrack(recentlyPlayedRef.current[0]);
+            syncMediaSession();
+          }
+        } catch (_) {}
+      })();
+    });
+    return () => sub.remove();
+  }, [syncMediaSession]);
+
+  // When user taps Pause on the DHU
+  useEffect(() => {
+    const sub = CarProjection.addMediaPauseListener(() => {
+      TrackPlayer.pause()
+        .then(() => {
+          setPlaybackState(State.Paused);
+          syncMediaSession();
+        })
+        .catch(() => {});
+    });
+    return () => sub.remove();
+  }, [syncMediaSession]);
 
   useEffect(() => {
     const sub = CarProjection.addMediaPlayFromIdListener((event) => {
@@ -122,6 +232,11 @@ export default function App() {
       await TrackPlayer.play();
       trackRef.current = item;
       setCurrentTrack(item);
+      // Add to recently played (most recent first, keep last MAX_RECENT)
+      setRecentlyPlayed((prev) => {
+        const next = [item, ...prev.filter((p) => p.id !== item.id)].slice(0, MAX_RECENT);
+        return next;
+      });
     } catch (e) {
       console.warn(e);
     }
@@ -147,6 +262,17 @@ export default function App() {
       {!ready && <Text style={styles.hint}>Initializing player…</Text>}
       {ready && (
         <>
+          {recentlyPlayed.length > 0 && (
+            <View style={styles.recentSection}>
+              <Text style={styles.recentTitle}>Recently played (last 3, shown in Android Auto browse)</Text>
+              {recentlyPlayed.map((item) => (
+                <TouchableOpacity key={item.id} style={styles.row} onPress={() => playTrack(item)}>
+                  <Text style={styles.rowTitle}>{item.title}</Text>
+                  <Text style={styles.rowArtist}>{item.artist}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          )}
           {currentTrack && (
             <View style={styles.nowPlaying}>
               <Text style={styles.nowTitle}>{currentTrack.title}</Text>
@@ -177,6 +303,8 @@ const styles = StyleSheet.create({
   title: { fontSize: 22, fontWeight: 'bold', marginBottom: 8 },
   subtitle: { fontSize: 16, color: '#666', marginBottom: 16 },
   hint: { fontSize: 14, color: '#888', marginBottom: 16 },
+  recentSection: { marginBottom: 16 },
+  recentTitle: { fontSize: 14, color: '#666', marginBottom: 8, fontWeight: '600' },
   nowPlaying: { marginBottom: 16, padding: 12, backgroundColor: '#f0f0f0', borderRadius: 8 },
   nowTitle: { fontWeight: '600' },
   nowArtist: { color: '#666', marginTop: 4 },
